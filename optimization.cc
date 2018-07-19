@@ -89,6 +89,7 @@ namespace giac {
 #endif // ndef NO_NAMESPACE_GIAC
 
 #define GOLDEN_RATIO 1.61803398875
+typedef unsigned long ulong;
 
 gen make_idnt(const char* name,int index=-1,bool intern=true) {
     stringstream ss;
