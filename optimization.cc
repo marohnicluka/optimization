@@ -355,12 +355,12 @@ vecteur global_extrema(gen &f,vecteur &g,vecteur &h,vecteur &vars,gen &mn,gen &m
     bool min_set=false,max_set=false;
     matrice min_locations;
     for (const_iterateur it=cv.begin();it!=cv.end();++it) {
-        gen val(subst(f,vars,*it,false,contextptr));
-        if (min_set && is_exactly_zero(val-mn)) {
+        gen val=_eval(subst(f,vars,*it,false,contextptr),contextptr);
+        if (min_set && is_exactly_zero(_ratnormal(val-mn,contextptr))) {
             if (find(min_locations.begin(),min_locations.end(),*it)==min_locations.end())
                 min_locations.push_back(*it);
         }
-        else if (!min_set || is_greater(mn,val,contextptr)) {
+        else if (!min_set || is_strictly_greater(mn,val,contextptr)) {
             mn=val;
             min_set=true;
             min_locations=vecteur(1,*it);
@@ -2537,7 +2537,7 @@ gen _triginterp(const gen &g,GIAC_CONTEXT) {
     } else if (args.size()==4 && (x=args.back()).type==_IDNT) {
         a=args.at(1);
         b=args.at(2);
-    } else return gentypeerr(contextptr);
+    } else return gensizeerr(contextptr);
     gen tp=triginterp(data,a,b,*x._IDNTptr,contextptr);
     if (is_approx(data) || is_approx(a) || is_approx(b))
         tp=_evalf(tp,contextptr);
@@ -2546,6 +2546,68 @@ gen _triginterp(const gen &g,GIAC_CONTEXT) {
 static const char _triginterp_s []="triginterp";
 static define_unary_function_eval (__triginterp,&_triginterp,_triginterp_s);
 define_unary_function_ptr5(at_triginterp,alias_at_triginterp,&__triginterp,0,true)
+
+/* kernel density estimation with Gaussian kernel */
+gen kernel_density(const vector<double> &data,double sd,double bw,const identificateur &x,GIAC_CONTEXT) {
+    int n=data.size();
+    if (bw<=0) {
+        double g6=1.23044723*sd,s=0,t;
+        for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
+            for (vector<double>::const_iterator jt=data.begin();jt!=data.end();++jt) {
+                t=(*it-*jt)/g6;
+                s+=(std::pow(t,6)-15*std::pow(t,4)+45*std::pow(t,2)-15)*std::exp(-std::pow(t,2)/2.0);
+            }
+        }
+        double g4=g6*std::pow(-(6.0*n)/s,0.142857142857);
+        s=0;
+        for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
+            for (vector<double>::const_iterator jt=data.begin();jt!=data.end();++jt) {
+                t=(*it-*jt)/g4;
+                s+=(std::pow(t,4)-6*std::pow(t,2)+3)*std::exp(-std::pow(t,2)/2.0);
+            }
+        }
+        bw=std::pow(double(n)/(1.41421356237*s),0.2)*g4;
+        *logptr(contextptr) << "Selected bandwidth (DPI): " << bw << endl;
+    }
+    double fac=1.0/(bw*n*std::sqrt(2.0*M_PI));
+    gen res(0),h(2.0*bw*bw);
+    for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
+        res+=exp(-pow(x-gen(*it),2)/h,contextptr);
+    }
+    return gen(fac)*res;
+}
+
+gen _kernel_density(const gen &g,GIAC_CONTEXT) {
+    if (g.type==_STRNG && g.subtype==-1) return g;
+    if (g.type!=_VECT)
+        return gentypeerr(contextptr);
+    gen bw(0);
+    gen x=identificateur("x");
+    if (g.subtype==_SEQ__VECT) {
+        if (g._VECTptr->size()<2 || g._VECTptr->size()>3 || g._VECTptr->front().type!=_VECT)
+            return gensizeerr(contextptr);
+        bw=g._VECTptr->at(1);
+        if (_evalf(bw,contextptr).type!=_DOUBLE_ || !is_strictly_positive(bw,contextptr))
+            return gensizeerr(contextptr);
+        if (g._VECTptr->size()==3) {
+            if ((x=g._VECTptr->back()).type!=_IDNT)
+                return gensizeerr(contextptr);
+        }
+    }
+    vecteur &data=g.subtype==_SEQ__VECT?*g._VECTptr->front()._VECTptr:*g._VECTptr;
+    vector<double> ddata(data.size());
+    gen e;
+    for (const_iterateur it=data.begin();it!=data.end();++it) {
+        if ((e=_evalf(*it,contextptr)).type!=_DOUBLE_)
+            return gensizeerr(contextptr);
+        ddata[it-data.begin()]=e.DOUBLE_val();
+    }
+    double sd=is_zero(bw)?_evalf(_stddev(data,contextptr),contextptr).DOUBLE_val():0;
+    return kernel_density(ddata,sd,_evalf(bw,contextptr).DOUBLE_val(),*x._IDNTptr,contextptr);
+}
+static const char _kernel_density_s []="kernel_density";
+static define_unary_function_eval (__kernel_density,&_kernel_density,_kernel_density_s);
+define_unary_function_ptr5(at_kernel_density,alias_at_kernel_density,&__kernel_density,0,true)
 
 #ifndef NO_NAMESPACE_GIAC
 }

@@ -109,6 +109,7 @@ gen _tpsolve(const gen &g,GIAC_CONTEXT);
 gen _nlpsolve(const gen &g,GIAC_CONTEXT);
 gen _thiele(const gen &g,GIAC_CONTEXT);
 gen _triginterp(const gen &g,GIAC_CONTEXT);
+gen _kernel_density(const gen &g,GIAC_CONTEXT);
 
 extern const unary_function_ptr * const at_implicitdiff;
 extern const unary_function_ptr * const at_minimize;
@@ -119,6 +120,7 @@ extern const unary_function_ptr * const at_tpsolve;
 extern const unary_function_ptr * const at_nlpsolve;
 extern const unary_function_ptr * const at_thiele;
 extern const unary_function_ptr * const at_triginterp;
+extern const unary_function_ptr * const at_kernel_density;
 
 #ifndef NO_NAMESPACE_GIAC
 } // namespace giac
