@@ -20,6 +20,17 @@ enum critical_point_classification {
     _CPCLASS_SADDLE=5
 };
 
+enum kernel_density_estimation_method {
+    _KDE_METHOD_EXACT,
+    _KDE_METHOD_PIECEWISE,
+    _KDE_METHOD_LIST
+};
+
+enum bandwidth_selection_method {
+    _KDE_BW_METHOD_DPI,
+    _KDE_BW_METHOD_ROT,
+};
+
 class ipdiff {
     /* IPDIFF CLASS (Implicit Partial DIFFerentiation)
      * This class is used for implicit differentiation of f with respect to g=0.

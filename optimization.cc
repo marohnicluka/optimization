@@ -79,6 +79,7 @@
 #include "giacPCH.h"
 #include "giac.h"
 #include "optimization.h"
+#include "signalprocessing.h"
 #include <sstream>
 #include <bitset>
 
@@ -2547,67 +2548,249 @@ static const char _triginterp_s []="triginterp";
 static define_unary_function_eval (__triginterp,&_triginterp,_triginterp_s);
 define_unary_function_ptr5(at_triginterp,alias_at_triginterp,&__triginterp,0,true)
 
-/* kernel density estimation with Gaussian kernel */
-gen kernel_density(const vector<double> &data,double sd,double bw,const identificateur &x,GIAC_CONTEXT) {
+/* select a good bandwidth for kernel density estimation using a direct plug-in method (DPI),
+ * Gaussian kernel is assumed */
+double select_bandwidth_dpi(const vector<double> &data,double sd) {
     int n=data.size();
-    if (bw<=0) {
-        double g6=1.23044723*sd,s=0,t;
-        for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
-            for (vector<double>::const_iterator jt=data.begin();jt!=data.end();++jt) {
-                t=(*it-*jt)/g6;
-                s+=(std::pow(t,6)-15*std::pow(t,4)+45*std::pow(t,2)-15)*std::exp(-std::pow(t,2)/2.0);
-            }
-        }
-        double g4=g6*std::pow(-(6.0*n)/s,0.142857142857);
-        s=0;
-        for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
-            for (vector<double>::const_iterator jt=data.begin();jt!=data.end();++jt) {
-                t=(*it-*jt)/g4;
-                s+=(std::pow(t,4)-6*std::pow(t,2)+3)*std::exp(-std::pow(t,2)/2.0);
-            }
-        }
-        bw=std::pow(double(n)/(1.41421356237*s),0.2)*g4;
-        *logptr(contextptr) << "Selected bandwidth (DPI): " << bw << endl;
-    }
-    double fac=1.0/(bw*n*std::sqrt(2.0*M_PI));
-    gen res(0),h(2.0*bw*bw);
+    double g6=1.23044723*sd,s=0,t,t2;
     for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
-        res+=exp(-pow(x-gen(*it),2)/h,contextptr);
+        for (vector<double>::const_iterator jt=it+1;jt!=data.end();++jt) {
+            t=(*it-*jt)/g6;
+            t2=t*t;
+            s+=(2*t2*(t2*(t2-15)+45)-30)*std::exp(-t2/2);
+        }
     }
-    return gen(fac)*res;
+    s-=15*n;
+    double g4=g6*std::pow(-(6.0*n)/s,1/7.0);
+    s=0;
+    for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
+        for (vector<double>::const_iterator jt=it+1;jt!=data.end();++jt) {
+            t=(*it-*jt)/g4;
+            t2=t*t;
+            s+=(2*t2*(t2-6)+6)*std::exp(-t2/2);
+        }
+    }
+    s+=3*n;
+    return std::pow(double(n)/(M_SQRT2*s),0.2)*g4;
+}
+
+gen fft_sum(const vecteur &c,const vecteur &k,int M,GIAC_CONTEXT) {
+    return _scalar_product(makesequence(c,_mid(makesequence(_convolution(makesequence(c,k),contextptr),M,M),contextptr)),contextptr);
+}
+
+/* faster bandwidth DPI selector using binned data and FFT */
+double select_bandwidth_dpi_bins(int n,const vecteur &c,double d,double sd,GIAC_CONTEXT) {
+    int M=c.size();
+    vecteur k(2*M+1);
+    double g6=1.23044723*sd,s=0,t,t2;
+    for (int i=0;i<=2*M;++i) {
+        t=d*double(i-M)/g6;
+        t2=t*t;
+        k[i]=gen((2*t2*(t2*(t2-15)+45)-30)*std::exp(-t2/2));
+    }
+    s=_evalf(fft_sum(c,k,M,contextptr),contextptr).DOUBLE_val();
+    double g4=g6*std::pow(-(6.0*n)/s,1/7.0);
+    for (int i=0;i<=2*M;++i) {
+        t=d*double(i-M)/g4;
+        t2=t*t;
+        k[i]=gen((2*t2*(t2-6)+6)*std::exp(-t2/2));
+    }
+    s=_evalf(fft_sum(c,k,M,contextptr),contextptr).DOUBLE_val();
+    return std::pow(double(n)/(M_SQRT2*s),0.2)*g4;
+}
+
+/* kernel density estimation with Gaussian kernel */
+gen kernel_density(const vector<double> &data,double bw,double sd,int bins,double a,double b,int interp,const gen &x,GIAC_CONTEXT) {
+    int n=data.size();
+    double SQRT_2PI=std::sqrt(2.0*M_PI);
+    if (bins<=0) { // return density as a sum of exponential functions, usable for up to few hundred samples
+        if (bw<=0)
+            bw=select_bandwidth_dpi(data,sd);
+        double fac=bw*n*SQRT_2PI;
+        gen res(0),h(2.0*bw*bw);
+        for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
+            res+=exp(-pow(x-gen(*it),2)/h,contextptr);
+        }
+        return res/gen(fac);
+    }
+    /* FFT method, constructs an approximation on [a,b] with the specified number of bins.
+     * If interp>0, interpolation of order interp is performed and the density is returned piecewise. */
+    assert(b>a && bins>0);
+    double d=(b-a)/(bins-1);
+    vecteur c(bins,0);
+    int index;
+    for (vector<double>::const_iterator it=data.begin();it!=data.end();++it) {
+        index=(int)((*it-a)/d+0.5);
+        if (index>=0 && index<bins) c[index]+=1;
+    }
+    if (bw<=0) { // select bandwidth
+        if (n<=1000)
+            bw=select_bandwidth_dpi(data,sd);
+        else bw=select_bandwidth_dpi_bins(n,c,d,sd,contextptr);
+        *logptr(contextptr) << "selected bandwidth: " << bw << endl;
+    }
+    int L=std::min(bins-1,(int)std::floor(1+4*bw/d));
+    vecteur k(2*L+1);
+    for (int i=0;i<=2*L;++i) {
+        k[i]=gen(1.0/(n*bw*SQRT_2PI)*std::exp(-std::pow(d*double(i-L)/bw,2)/2.0));
+    }
+    gen res=_mid(makesequence(_convolution(makesequence(c,k),contextptr),L,bins),contextptr);
+    if (interp>0) { // interpolate the obtained points
+        int pos0=0;
+        if (x.type!=_IDNT) {
+            double xd=_evalf(x,contextptr).DOUBLE_val();
+            if (xd<a || xd>=b || (pos0=std::floor((xd-a)/d))>bins-2)
+                return 0;
+            if (interp==1) {
+                gen &y1=res._VECTptr->at(pos0),&y2=res._VECTptr->at(pos0+1),x1=a+pos0*d;
+                return y1+(x-x1)*(y2-y1)/gen(d);
+            }
+        }
+        vecteur pos(bins);
+        for (int i=0;i<bins;++i) pos[i]=a+d*i;
+        identificateur X=x.type==_IDNT?*x._IDNTptr:identificateur(" X");
+        vecteur p=*_spline(makesequence(pos,res,X,interp),contextptr)._VECTptr;
+        vecteur args(0);
+        if (x.type==_IDNT)
+            args.reserve(2*bins+1);
+        for (int i=0;i<bins;++i) {
+            if (x.type==_IDNT) {
+                args.push_back(i+1<bins?symb_inferieur_strict(X,pos[i]):symb_inferieur_egal(X,pos[i]));
+                args.push_back(i==0?gen(0):p[i-1]);
+            } else if (i==pos0) res=_ratnormal(_subst(makesequence(p[i],X,x),contextptr),contextptr);
+            if (i+1<bins && !_solve(makesequence(p[i],symb_equal(X,symb_interval(pos[i],pos[i+1]))),contextptr)._VECTptr->empty())
+                *logptr(contextptr) << "Warning: interpolated density has negative values in ["
+                                    << pos[i] << "," << pos[i+1] << "]" << endl;
+        }
+        if (x.type!=_IDNT) return res;
+        args.push_back(0);
+        res=symbolic(at_piecewise,change_subtype(args,_SEQ__VECT));
+        return res;
+    }
+    return res;
+}
+
+bool parse_interval(const gen &feu,double &a,double &b,GIAC_CONTEXT) {
+    vecteur &v=*feu._VECTptr;
+    gen l=v.front(),r=v.back();
+    if ((l=_evalf(l,contextptr)).type!=_DOUBLE_ || (r=_evalf(r,contextptr)).type!=_DOUBLE_ ||
+            !is_strictly_greater(r,l,contextptr))
+        return false;
+    a=l.DOUBLE_val(); b=r.DOUBLE_val();
+    return true;
 }
 
 gen _kernel_density(const gen &g,GIAC_CONTEXT) {
     if (g.type==_STRNG && g.subtype==-1) return g;
     if (g.type!=_VECT)
         return gentypeerr(contextptr);
-    gen bw(0);
     gen x=identificateur("x");
+    double a=0,b=0,bw=0,sd,d,sx=0,sxsq=0;
+    int bins=100,interp=1,method=_KDE_METHOD_LIST,bw_method=_KDE_BW_METHOD_DPI;
     if (g.subtype==_SEQ__VECT) {
-        if (g._VECTptr->size()<2 || g._VECTptr->size()>3 || g._VECTptr->front().type!=_VECT)
-            return gensizeerr(contextptr);
-        bw=g._VECTptr->at(1);
-        if (_evalf(bw,contextptr).type!=_DOUBLE_ || !is_strictly_positive(bw,contextptr))
-            return gensizeerr(contextptr);
-        if (g._VECTptr->size()==3) {
-            if ((x=g._VECTptr->back()).type!=_IDNT)
-                return gensizeerr(contextptr);
+        // parse options
+        for (const_iterateur it=g._VECTptr->begin()+1;it!=g._VECTptr->end();++it) {
+            if (it->is_symb_of_sommet(at_equal)) {
+                gen &opt=it->_SYMBptr->feuille._VECTptr->front();
+                gen &v=it->_SYMBptr->feuille._VECTptr->back();
+                if (opt==_KDE_BANDWIDTH) {
+                    if (v==at_select)
+                        bw_method=_KDE_BW_METHOD_DPI;
+                    else if (v==at_gauss || v==at_normal || v==at_normald)
+                        bw_method=_KDE_BW_METHOD_ROT;
+                    else {
+                        gen ev=_evalf(v,contextptr);
+                        if (ev.type!=_DOUBLE_ || !is_strictly_positive(ev,contextptr))
+                            return gensizeerr(contextptr);
+                        bw=ev.DOUBLE_val();
+                    }
+                } else if (opt==_KDE_BINS) {
+                    if (!v.is_integer() || !is_strictly_positive(v,contextptr))
+                        return gensizeerr(contextptr);
+                    bins=v.val;
+                } else if (opt==at_range) {
+                    if (v.type==_VECT) {
+                        if (v._VECTptr->size()!=2 || !parse_interval(v,a,b,contextptr))
+                            return gensizeerr(contextptr);
+                    } else if (!v.is_symb_of_sommet(at_interval) ||
+                               !parse_interval(v._SYMBptr->feuille,a,b,contextptr))
+                        return gensizeerr(contextptr);
+                } else if (opt==at_output || opt==at_Output) {
+                    if (v==at_exact)
+                        method=_KDE_METHOD_EXACT;
+                    else if (v==at_piecewise)
+                        method=_KDE_METHOD_PIECEWISE;
+                    else if (v==_MAPLE_LIST)
+                        method=_KDE_METHOD_LIST;
+                    else return gensizeerr(contextptr);
+                } else if (opt==at_interp) {
+                    if (!v.is_integer() || (interp=v.val)<1)
+                        return gensizeerr(contextptr);
+                } else if (opt==at_spline) {
+                    if (!v.is_integer() || (interp=v.val)<1)
+                        return gensizeerr(contextptr);
+                    method=_KDE_METHOD_PIECEWISE;
+                } else if (opt.type==_IDNT) {
+                    x=opt;
+                    if (!v.is_symb_of_sommet(at_interval) || !parse_interval(v._SYMBptr->feuille,a,b,contextptr))
+                        return gensizeerr(contextptr);
+                } else if (opt==at_eval) x=v;
+                else return gensizeerr(contextptr);
+            } else if (it->type==_IDNT) x=*it;
+            else if (it->is_symb_of_sommet(at_interval)) {
+                if (!parse_interval(it->_SYMBptr->feuille,a,b,contextptr))
+                    return gensizeerr(contextptr);
+            } else if (*it==at_exact)
+                method=_KDE_METHOD_EXACT;
+            else if (*it==at_piecewise)
+                method=_KDE_METHOD_PIECEWISE;
+            else return gensizeerr(contextptr);
         }
     }
+    if (x.type!=_IDNT && (_evalf(x,contextptr).type!=_DOUBLE_ || method==_KDE_METHOD_LIST))
+        return gensizeerr(contextptr);
     vecteur &data=g.subtype==_SEQ__VECT?*g._VECTptr->front()._VECTptr:*g._VECTptr;
-    vector<double> ddata(data.size());
+    int n=data.size();
+    if (n<2)
+        return gensizeerr(contextptr);
+    vector<double> ddata(n);
     gen e;
     for (const_iterateur it=data.begin();it!=data.end();++it) {
         if ((e=_evalf(*it,contextptr)).type!=_DOUBLE_)
             return gensizeerr(contextptr);
-        ddata[it-data.begin()]=e.DOUBLE_val();
+        d=ddata[it-data.begin()]=e.DOUBLE_val();
+        sx+=d;
+        sxsq+=d*d;
     }
-    double sd=is_zero(bw)?_evalf(_stddev(data,contextptr),contextptr).DOUBLE_val():0;
-    return kernel_density(ddata,sd,_evalf(bw,contextptr).DOUBLE_val(),*x._IDNTptr,contextptr);
+    sd=std::sqrt(1/double(n-1)*(sxsq-1/double(n)*sx*sx));
+    if (bw_method==_KDE_BW_METHOD_ROT) { // Silverman's rule of thumb
+        double iqr=_evalf(_quartile3(data,contextptr)-_quartile1(data,contextptr),contextptr).DOUBLE_val();
+        bw=1.06*std::min(sd,iqr/1.34)*std::pow(double(data.size()),-0.2);
+        *logptr(contextptr) << "selected bandwidth: " << bw << endl;
+    }
+    if (bins>0 && a==0 && b==0) {
+        a=_evalf(_min(data,contextptr),contextptr).DOUBLE_val()-3*bw;
+        b=_evalf(_max(data,contextptr),contextptr).DOUBLE_val()+3*bw;
+    }
+    if (method==_KDE_METHOD_EXACT)
+        bins=0;
+    else if (method==_KDE_METHOD_LIST) {
+        if (bins<1)
+            return gensizeerr(contextptr);
+        interp=0;
+    } else if (method==_KDE_METHOD_PIECEWISE) {
+        if (bins<1 || interp<1)
+            return gensizeerr(contextptr);
+    }
+    return kernel_density(ddata,bw,sd,bins,a,b,interp,x,contextptr);
 }
 static const char _kernel_density_s []="kernel_density";
 static define_unary_function_eval (__kernel_density,&_kernel_density,_kernel_density_s);
 define_unary_function_ptr5(at_kernel_density,alias_at_kernel_density,&__kernel_density,0,true)
+
+static const char _kde_s []="kde";
+static define_unary_function_eval (__kde,&_kernel_density,_kde_s);
+define_unary_function_ptr5(at_kde,alias_at_kde,&__kde,0,true)
 
 #ifndef NO_NAMESPACE_GIAC
 }
